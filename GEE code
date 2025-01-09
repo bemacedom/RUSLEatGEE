@@ -1,0 +1,563 @@
+// // MALI SUB-BASINS: BANDIAGARA II AND SIANI 
+
+  // var studyarea = geometry;
+  Map.addLayer(studyarea, {});
+
+
+// // SOIL LOSS (A)
+// A = R*K*LS*C*P
+// P = 1, without conservation practices
+
+//FACTORS
+
+// // R - EROSIVITY FACTOR 
+// // (Roose, 1977)
+
+// Defina as datas de início e fim para o período de estudo.
+var start_date = '1981-01-01';
+var end_date = '2023-12-31';
+var years = ee.List.sequence(1981, 2023); // Alterar para o intervalo de anos desejado
+
+// Climate Hazards Group InfraRed Precipitation with Station data (Funk et al., 2015)
+var CHIRPS = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY");
+
+// Function to calculate the average sum of rainfall over the years
+function calculateMonthlySum(month, years, chirpsClipped) {
+    var monthlyImages = years.map(function(year) {
+        var start = ee.Date.fromYMD(year, month, 1);
+        var end = start.advance(1, 'month');
+        var filtered = chirpsClipped.filterDate(start, end);
+        return filtered.sum().set('year', year);
+    });
+    var monthlyImagesCollection = ee.ImageCollection.fromImages(monthlyImages);
+    var average = monthlyImagesCollection.mean();
+    return average.set('month', month);
+  
+}
+var chirps = CHIRPS.filterDate(start_date, end_date).select('precipitation');
+var chirpsClipped = chirps.map(function(image) {
+    return image.clip(studyarea)});
+var months = ee.List.sequence(1, 12);
+var years = ee.List.sequence(1981, 2023);
+    
+// Calculate averages of monthly rainfall sums over the years
+var monthlyAverages = months.map(function(month) {
+    return calculateMonthlySum(month, years, chirpsClipped).set('month', month);
+});
+var monthlyAveragesCollection = ee.ImageCollection.fromImages(monthlyAverages);
+
+var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// // Apply monthly R Factor calculation to all months of the year  
+var monthlyLayers = monthNames.map(function(monthName, index) {
+    var month = index + 1; // months are 1-based in JavaScript
+    var monthlyAverage = ee.Image(monthlyAveragesCollection.filter(ee.Filter.eq('month', month)).first());
+    var layer;
+    if ([1, 2, 3, 4, 5, 10, 11, 12].indexOf(month) !== -1) {
+        layer = monthlyAverage.where(monthlyAverage.gt(0), monthlyAverage.log().multiply(0.5).exp());
+    } else if ([6, 7, 8, 9].indexOf(month) !== -1) {
+        layer = monthlyAverage.where(monthlyAverage.gt(0), monthlyAverage.multiply(0.577).subtract(5.766));
+    }
+    layer = layer.rename('fator R').set('month', monthName); 
+    return layer;
+});
+
+// Função para calcular o fator R para um mês específico
+function calculateMonthlyRFactor(month) {
+    var monthlyAverage = ee.Image(monthlyAveragesCollection.filter(ee.Filter.eq('month', month)).first());
+    var Rn;
+    if ([1, 2, 3, 4, 5, 10, 11, 12].indexOf(month) !== -1) {
+        Rn = monthlyAverage.where(monthlyAverage.gt(0), monthlyAverage.log().multiply(0.5).exp());
+    } else if ([6, 7, 8, 9].indexOf(month) !== -1) {
+        Rn = monthlyAverage.where(monthlyAverage.gt(0), monthlyAverage.multiply(0.577).subtract(5.766));
+    }
+    Rn = Rn.rename('fatorR').clip(studyarea);
+    return Rn;
+}
+
+var RFactorLayers = [];
+// for (var month = 1; month <= 12; month++) {
+  // var RFactor = calculateMonthlyRFactor(month);
+// 	RFactorLayers.push(RFactor);
+// 	Map.addLayer(RFactor, {min: 0, max: 1, palette: ['blue', 'green']}, 'RFactor ' + month);
+	
+// 	(function(currentMonth, currentRFactor) {
+// 	var RParams = {
+    // image: currentRFactor,
+    // description: 'RFactor_' + currentMonth,
+    // folder: 'Tese-RUSLE-RFactors',
+    // maxPixels: 1e13,
+    // scale: 30, 
+    // region: studyarea 
+    // };
+    // Export.image.toDrive(RParams);
+    // })(month, RFactor);
+// }
+
+// Calculate annual R factor
+var allLayers = ee.Image.cat(monthlyLayers);
+var sumOfFactors = allLayers.reduce(ee.Reducer.sum());
+var Rr = sumOfFactors;
+var R = Rr.multiply(17.02); //convert american units to SI metric (Foster et al., 1981)
+
+
+// // K - ERODIBILITY FACTOR 
+// //(Wischmeier and Smith, 1978; Auerswald et al., 2014);
+
+  // Input data:
+  var sand = ee.Image("ISDASOIL/Africa/v1/sand_content"),
+  silt = ee.Image("ISDASOIL/Africa/v1/silt_content"),
+  clay = ee.Image("ISDASOIL/Africa/v1/clay_content"),
+  corg = ee.Image("ISDASOIL/Africa/v1/carbon_organic"),
+  USDAtext = ee.Image("ISDASOIL/Africa/v1/texture_class"),
+  TAXO = ee.Image("projects/ee-bemacedom/assets/TAXNWRB"),
+  STRU = ee.FeatureCollection("projects/ee-bemacedom/assets/struct-Mali"),
+  stone = ee.Image("ISDASOIL/Africa/v1/stone_content");
+
+// Map.addLayer(USDAtext, {}, 'usda');
+// Map.addLayer(TAXO, {}, 'taxo');
+
+  // Soil texture to permeability class (p): 
+  var fromList = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+  var toList = [6,  6,  5,  4,  5,  4,  3,  3,  2,  3,  2, 1];
+  var P = USDAtext.remap({from: fromList, to: toList, defaultValue: 0, bandName: 'texture_0_20'}).clip(studyarea);
+  
+  //Structure class (s) from soil groups:
+  var A = ee.Image().int().paint(STRU, 'STRUCTURE').rename('Soil Structure');
+  
+  // K1: 1st, check if Silt + Very Fine Sand is higher or lower than 70%
+  
+    // Very fine sand
+    var vfsa = sand.multiply(0.2).clip(studyarea);
+    
+    // Silt + Very fine sand
+    var sivfsa = silt.add(vfsa).clip(studyarea);
+    
+    // Clay content
+    var Fcla = ee.Image(100).subtract(clay).clip(studyarea);
+
+    // Check if the sum is less than 70
+    var condition_K1 = sivfsa.lte(70);
+    
+    // Calculate K1 for the pixels where the condition is true
+    var K1_true = sivfsa.multiply(Fcla).pow(1.14).multiply(2.77e-5);
+    
+    // Calculate K1 for the pixels where the condition is false (greater than 70)
+    var K1_false = ee.Image(1.75e-5).multiply(sivfsa.multiply(Fcla).pow(1.14)).add(ee.Image(0.0024).multiply(sivfsa)).add(0.16);
+
+    // Apply the condition to obtain the final image of K1
+    var K1 = K1_true.where(condition_K1, K1_false);
+
+  
+  // K2: 2nd, check whether the organic matter content is greater or less than 4% 
+
+    //Corg to OM, multiply van Bemmelen factor of 1.724, otherwise 0.58
+    //OM = g/kg to %, divide 10
+    var OM = corg.multiply(1.724).divide(10).clip(studyarea);
+    var condition_K2 = OM.lte(4);
+    
+    // Calculate K2 for the pixels where the condition is true
+    var K2_true = ee.Image(12).subtract(OM).divide(10);
+
+    // Calculate K2 for pixels where the condition is false
+    var K2_false = ee.Image(0.8);
+    
+    // Apply the condition to obtain the final image of K2
+    var K2 = K2_true.where(condition_K2, K2_false);
+  
+  
+  // K3: 3rd, check if the product of K1 and K2 is greater or less than 0.2 
+  
+    var K1K2 = K1.multiply(K2);
+    var condition_K3 = K1K2.gte(0.2);
+    
+    // Calculate K3 for the pixels where the condition is true
+    var K3_true = K1K2.add(ee.Image(0.043).multiply(A.subtract(2))).add(ee.Image(0.033).multiply(P.subtract(3)));
+    
+    // Calculate K3 for the pixels where the condition is false
+    var K3_false = ee.Image(0.091).subtract(ee.Image(0.34).multiply(K1K2)).add(ee.Image(1.79).multiply(K1K2.pow(2))).add(ee.Image(0.24).multiply(K1K2.multiply(A))).add(ee.Image(0.033).multiply(P.subtract(3)));
+    
+    // Apply the condition to obtain the final image of K3
+    var K3 = K3_true.where(condition_K3, K3_false);
+  
+  
+  // K4: 4th, load the stone content (%)
+  
+    var stonecontent = stone.clip(studyarea);
+    
+    // Check if the stone content is greater or less than 1.5
+    var condition_K4 = stonecontent.lte(1.5);
+    
+    // Calculate K4 for the pixels where the condition is true
+    var K4_true = K3;
+
+    // Calculate K4 for the pixels where the condition is false
+    //var K4_false = K3.multiply(ee.Image(1.1).multiply(stonecontent.multiply(-0.024).exp()).subtract(0.06));
+    var K4_false = K3.expression(
+      'K3 * (1.1 * exp(-0.024 * stone) - 0.06)', {
+      'K3': K3,
+      'stone': stonecontent
+      });
+    
+    // Apply the condition to obtain the final image of K4 (t MJ^-1 h mm^-1)
+    var K4 = K4_true.where(condition_K4, K4_false);
+    var K = K4.divide(10);
+
+    // validation K factor by Wischmeier and Smith, 1978:
+    // K = Ka*Kb + 0.043*(a-2)+0.033*(P-3)
+    // Ka = 2.77*10^-5*(fsi+vfsa*(100-fcl))^1.14
+    // Kb = (12-fom)/10
+    var Ka = ee.Image(2.77e-5).multiply(sivfsa.multiply(Fcla).pow(1.14));
+    var Kb = ee.Image(12).subtract(OM).divide(10);
+    var Kval = Ka.multiply(Kb).add(ee.Image(0.043).multiply(A.subtract(2))).add(ee.Image(0.033).multiply(P.subtract(3)));
+    //Kval unit are t ha^1 h N^-1 (at metric system)
+    //to convert the unit to t MJ^-1 h mm^-1 should be multiply by 10
+    var Kv = Kval.divide(10);
+    // Map.addLayer(Kv, {}, 'K validation');
+
+
+// // LS - TOPOGRAPHIC FACTOR 
+// //(Wischmeier and Smith, 1978; Desmet and Govers, 1996; Renard et al., 1997)
+
+  // Input data:
+  
+    // Digital Elevation Model (DEM)
+    var dem = ee.Image("USGS/SRTMGL1_003").clip(studyarea);
+    
+    // Calculate slope in radians from the DEM
+    var slope = ee.Terrain.slope(dem);
+    var slope_rad = slope.multiply(Math.PI / 180);
+    var slope_sin = slope_rad.sin();
+    var slope_per = slope_rad.tan().multiply(100);
+    
+    // Definir as classes de reclassificação (baseado na declividade)
+var originalValues = [0, 3, 8, 13, 20, 45]; // Limites da declividade
+var newValues = [1, 2, 3, 4, 5, 6]; // Novos valores para cada classe
+//sendo: 1 plano, 2 suave ondulado, 3 moderadamente ondulado, 4 ondulado, 5 forte ondulado, 6 montanhoso e escarpado
+
+// Aplicar a reclassificação usando remap()
+var slope_rec = slope_per.remap(originalValues, newValues);
+
+    // Flow accumulation from the MERIT project
+    var facc = ee.Image("MERIT/Hydro/v1_0_1").select("upa").clip(studyarea);
+  
+    // Calculate aspect in radians
+    var aspect = ee.Terrain.aspect(dem);
+    var aspect_rad = aspect.multiply(Math.PI / 180);
+
+  // L factor (Desmet and Govers, 1996)
+  
+    // Calculate F, m, X, and D
+    var F = slope_sin.divide(0.0896).divide(slope_sin.pow(0.8).multiply(3).add(0.56));
+    var m = F.divide(F.add(1));
+    var X = aspect_rad.sin().abs().add(aspect_rad.cos().abs());
+    var D = ee.Image.constant(30);
+  
+    // Calculate L factor
+    var L = dem.expression(
+      "((facc + (D**2))**(m + 1) - (facc**m)) / ((D**(m + 2)) * (X**m) * (22.13**m))",
+      {
+      'facc': facc,
+        'D': D,
+        'm': m,
+        'X': X
+    }
+    );
+
+  // Calculate S factor - Renard et al. (1997)
+  var S = ee.Algorithms.If(slope_rad.tan().lt(0.09), // Convert slope in radian to steepness (in %)
+                            slope_sin.multiply(10.8).add(0.03), // Mild slope condition < 9 %
+                            slope_sin.multiply(16.8).subtract(0.5)); // Steep slope condition >= 9%
+
+  
+  // Calculate LS factor
+  var LS = L.multiply(S);
+  Map.addLayer(LS, {}, "LS");
+  
+// Função para calcular estatísticas (quartis e IQR)
+var calculateStatistics = function(image, area, scale) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.percentile([25, 50, 75]),
+    geometry: area,
+    scale: scale,
+    maxPixels: 1e9
+  });
+  return stats;
+};
+
+// Função para identificar e remover outliers superiores
+var removeUpperOutliers = function(image, area, scale) {
+  var stats = calculateStatistics(image, area, scale);
+  var q1 = ee.Number(stats.get('upa_p25')); 
+  var q3 = ee.Number(stats.get('upa_p75')); 
+  var iqr = q3.subtract(q1);
+  var upperFence = q3.add(iqr.multiply(1.5));
+  
+  // Filtrar a imagem para remover apenas os outliers superiores
+  var filteredImage = image.updateMask(image.lte(upperFence));
+  
+  return {
+    filteredImage: filteredImage,
+    upperFence: upperFence
+  };
+};
+
+var result = removeUpperOutliers(LS, studyarea, 30);
+var filteredLS = result.filteredImage;
+var upperFence = result.upperFence;
+
+// print('Upper Fence:', upperFence);
+Map.addLayer(filteredLS, {}, 'Filtered LS');
+var LS = filteredLS;
+
+// // // ----- Cover management: C factor   
+// 1. Study Area and preparation
+
+// Centralizando o mapa na área de estudo
+Map.centerObject(studyarea);
+
+// Definindo parâmetros
+var index = 'NDVI'; 
+var start_date = '2000-02-18';
+var end_date = '2022-02-18';
+
+// Criando filtros
+var filter = function(image){ 
+  var mask = image.select('SummaryQA').eq(0);
+  return ee.Image(image).updateMask(mask);
+}; // Selecionando apenas pixels de alta qualidade
+
+var clip = function(image){
+  return image.clip(studyarea).copyProperties(image);
+}; // Recortando a coleção para a região
+
+// 2. Loading, filtering the collection
+
+var c = ee.ImageCollection('MODIS/061/MOD13Q1')
+  .filterDate(start_date, end_date)
+  .map(filter)
+  .select(index)
+  .map(clip);
+  
+// 3. Creating a function to add independent variables 
+
+function addIndependentVariables(image) {
+  var date = ee.Date(image.get('system:time_start'));
+  var phase = date.getFraction('year').multiply(2 * Math.PI);
+  var sin = phase.sin();
+  var cos = phase.cos();
+  var time = date.difference(ee.Date('2000-01-01'), 'year');
+  var independent = ee.Image([time, cos, sin]).double();
+  return independent.addBands(image.divide(10000));
+}
+
+// 4. Fitting a linear regression and extracting results
+
+var ridgeRegression = c.map(addIndependentVariables)
+  .reduce(ee.Reducer.ridgeRegression(3, 1, 0));
+
+var coefficients = ridgeRegression
+  .select('coefficients').arrayProject([0])
+  .arrayFlatten([['β0','β1','β2','β3']]);
+
+var β1 = coefficients
+  .select('β1')
+  .rename(ee.String('trend_').cat(index));
+
+var pValue = ridgeRegression
+  .select('pValue').arrayProject([0])
+  .arrayFlatten([['pValue']])
+  .rename(ee.String('pValue').cat(index));
+  
+// 5. Plotting results
+
+// Map.addLayer(β1, {
+  // min: -0.0075, max: 0.0075, 
+  // palette:['red','white', 'green']
+// }, 'β1', true);
+
+// Map.addLayer(pValue, { 
+  // min: 0, max: 0.001, 
+  // palette:['blue','white','red'] 
+// }, 'pValue', true);
+
+// 6. Plotting examples
+
+function addIndependentVariables_2(image) {
+  var date = ee.Date(image.get('system:time_start'));
+  var phase = date.getFraction('year').multiply(2 * Math.PI);
+  var sin = phase.sin();
+  var cos = phase.cos();
+  var constant = 1;
+  var time = date.difference(ee.Date('2000-01-01'), 'year');
+  var independent = ee.Image([constant, time, cos, sin]).double();
+  return independent.addBands(image.divide(10000));
+}  
+
+var c_2 = c.map(addIndependentVariables_2);
+
+var c_fitted = c_2.map(function(image){
+  var fitted = image.select(ee.List(['constant', 'constant_1', 'constant_2', 'constant_3']))
+    .multiply(coefficients)
+    .reduce('sum')
+    .rename('fitted');
+  var trend = image.select(ee.List(['constant', 'constant_1']))
+    .multiply(coefficients.select(['β0','β1']))
+    .reduce('sum')
+    .rename('trend');
+  return image.addBands([fitted, trend]).set('system:time_start', image.get('system:time_start'));
+});
+
+// // 7. Calculating model performance 
+
+var compare = c_fitted.select(['fitted', index]);
+var mean_index = c_fitted.select(index).reduce(ee.Reducer.mean())
+  .rename(ee.String('mean_').cat(index));
+
+var n = compare.select(index).count();
+
+var res = function(image){
+  var pred = image.select('fitted');
+  var obs = image.select(index);
+  var resid = pred.subtract(obs);
+  var resid2 = resid.multiply(resid);
+  return resid2.rename('residsqd');
+}; 
+
+var residsqd = compare.map(res).reduce(ee.Reducer.sum());
+var rmse = residsqd.divide(n).sqrt()
+  .rename(ee.String('RMSE_').cat(index));
+
+var nrmse = rmse.multiply(100).divide(mean_index)
+  .rename(ee.String('nRMSE_').cat(index));
+
+var sqd = function(image){
+  var obs = image.select(index); 
+  var mean_obs = mean_index.select(ee.String('mean_').cat(index));
+  var diff = obs.subtract(mean_obs);
+  var diff2 = diff.multiply(diff);
+  return diff2.rename('sumsq');
+};
+
+var sumsqd = compare.map(sqd).reduce(ee.Reducer.sum());
+var r2 = ee.Image([1]).subtract((residsqd.divide(sumsqd)))
+  .rename(ee.String('R2_').cat(index));
+
+// // FATOR C (Durigon et al. 2014)
+
+// // Função para extrair o mês de uma imagem e definir a propriedade 'month'
+var extractMonth = function(image) {
+  var dateString = ee.String(image.get('system:index'));
+  var date = ee.Date.parse('yyyy_MM_dd', dateString);
+  var month = date.get('month');
+  return image.set('month', month);
+};
+
+// // Adicionar a propriedade 'month' a cada imagem na coleção
+var collectionWithMonth = c_fitted.map(extractMonth);
+
+// // Função para calcular a média da banda 'fitted' e o fator C para um mês específico
+var calculateMonthlyCFactor = function(month) {
+  var monthlyCollection = collectionWithMonth.filter(ee.Filter.eq('month', month));
+  var meanMonthlyNDVI = monthlyCollection.select('fitted').mean();
+  var CFactor = meanMonthlyNDVI.rename('Fator C').multiply(-1).add(1).divide(2);
+  return CFactor;
+};
+
+// Lista para armazenar as camadas do fator C
+var CFactorLayers = [];
+
+// Iterar sobre os 12 meses, calcular o fator C para cada mês e exportar a imagem
+for (var month = 1; month <= 12; month++) {
+  var CFactor = calculateMonthlyCFactor(month);
+  CFactorLayers.push(CFactor);
+  
+  // Adicionar a camada ao mapa
+  // Map.addLayer(CFactor, {min: 0, max: 1}, 'Fator C - Mês ' + month);
+} 
+
+// // Função para calcular os valores mínimos, médios e máximos do fator C na área de estudo
+var calculateStatistics = function(image, area) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.minMax().combine({
+      reducer2: ee.Reducer.mean(),
+      sharedInputs: true
+    }),
+    geometry: studyarea,
+    scale: 1000, 
+    maxPixels: 1e9
+  });
+  return stats;
+};
+
+// // Calcular os valores mínimos, médios e máximos para cada camada do fator C
+CFactorLayers.forEach(function(CFactor, index) {
+  var stats = calculateStatistics(CFactor, studyarea);
+  // print('Estatísticas do Fator C - Mês ' + (index + 1), stats);
+});
+
+// // // 1. Função para exportar a imagem para o Google Drive
+// function exportCFactorToDrive(image, month, area) {
+//   Export.image.toDrive({
+//     image: image,
+//     description: 'CFactor_' + month,
+//     folder: 'Tese-RUSLE', // Especifique a pasta no Google Drive
+//     fileNamePrefix: 'CFactor_' + month,
+//     region: studyarea,
+//     maxPixels: 1e9,
+//     crs: 'EPSG:4326' // Sistema de coordenadas padrão
+//   });
+// }
+
+// // Iterar sobre os 12 meses, calcular o fator C para cada mês e exportar a imagem
+for (var month = 1; month <= 12; month++) {
+  var CFactor = calculateMonthlyCFactor(month);
+  CFactorLayers.push(CFactor);
+
+
+var dryMonths = [1, 2, 3, 4, 5, 10, 11, 12];
+var rainyMonths = [6, 7, 8, 9];
+
+function calculateRFactorForPeriod(months, monthlyAveragesCollection) {
+    var periodLayers = months.map(function(month) {
+        var monthlyAverage = ee.Image(monthlyAveragesCollection.filter(ee.Filter.eq('month', month)).first());
+        var Rn;
+        if (dryMonths.indexOf(month) !== -1) {
+            Rn = monthlyAverage.where(monthlyAverage.gt(0), monthlyAverage.log().multiply(0.5).exp());
+        } else if (rainyMonths.indexOf(month) !== -1) {
+            Rn = monthlyAverage.where(monthlyAverage.gt(0), monthlyAverage.multiply(0.577).subtract(5.766));
+        }
+        return Rn;
+    });
+    var periodImage = ee.ImageCollection.fromImages(periodLayers).sum();
+    return periodImage;
+}
+
+var Rdry = calculateRFactorForPeriod(dryMonths, monthlyAveragesCollection).multiply(17.02);
+var Rrainy = calculateRFactorForPeriod(rainyMonths, monthlyAveragesCollection).multiply(17.02);
+
+var calculateAverageCFactor = function(months) {
+  var selectedLayers = ee.ImageCollection.fromImages(
+    months.map(function(month) {
+      return CFactorLayers[month - 1];
+    })
+  );
+  return selectedLayers.mean().rename('Fator C Médio');
+};
+
+var dryMonthsCFactor = calculateAverageCFactor(dryMonths);
+var rainyMonthsCFactor = calculateAverageCFactor(rainyMonths);
+
+var Cdry = dryMonthsCFactor;
+var Crainy = rainyMonthsCFactor;
+
+// // //A soil loss para cada periodo, seco e chuvoso:
+var Arainy = K.multiply(LS).multiply(Crainy).multiply(Rrainy);
+var Adry = K.multiply(LS).multiply(Cdry).multiply(Rdry);
+
+// //A - SOIL LOSS 
+// //RUSLE (Wischmeier and Smith, 1978; Renard et al., 1997)
+var C = Crainy.add(Cdry).divide(2);
+
+var loss = K.multiply(LS).multiply(C).multiply(R);
+Map.addLayer(loss, {}, 'yearly loss');
